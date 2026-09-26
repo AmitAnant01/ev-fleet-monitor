@@ -3,6 +3,7 @@
 Streamlit dashboard for monitoring a 50-car EV fleet — admin fleet analytics
 + driver-facing range prediction. Built over a 3–4 day sprint by 8 people.
 
+🚀 Live Demo: [(https://ev-fleet-monitor-page.streamlit.app/)]
 ## Quick start
 
 ```bash
