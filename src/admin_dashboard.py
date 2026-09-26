@@ -226,8 +226,16 @@ def _show_key_fleet_metrics(df: pd.DataFrame):
 
 
 def show_admin_dashboard(df: pd.DataFrame):
+    full_df = df
+    filtered_df = _sidebar_command_center(full_df)
+
     st.title("Fleet Overview")
     st.caption("Live status and performance across the full EV fleet")
+    if len(filtered_df) != len(full_df):
+        st.caption(
+            f"🔎 Sidebar filter active — showing {len(filtered_df):,} of "
+            f"{len(full_df):,} records. Clear it in the sidebar to see everything."
+        )
 
     (tab_fleet, tab_key, tab_driver, tab_car, tab_filters,
      tab_alerts, tab_predictive, tab_leaderboard, tab_reports,
@@ -238,34 +246,37 @@ def show_admin_dashboard(df: pd.DataFrame):
     )
 
     with tab_fleet:
-        _show_fleet_overview(df)
+        _show_fleet_overview(filtered_df)
 
     with tab_key:
-        _show_key_fleet_metrics(df)
+        _show_key_fleet_metrics(filtered_df)
 
     with tab_driver:
-        _show_driver_lookup(df)
+        _show_driver_lookup(filtered_df)
 
     with tab_car:
-        _show_car_lookup(df)
+        _show_car_lookup(filtered_df)
 
     with tab_filters:
-        _show_advanced_filters(df)
+        _show_advanced_filters(filtered_df)
 
     with tab_alerts:
-        _show_alerts_health(df)
+        _show_alerts_health(filtered_df)
 
     with tab_predictive:
-        _show_predictive_maintenance(df)
+        _show_predictive_maintenance(filtered_df)
 
     with tab_leaderboard:
-        _show_driver_leaderboard(df)
+        _show_driver_leaderboard(filtered_df)
 
     with tab_reports:
-        _show_reports_center(df)
+        _show_reports_center(filtered_df)
 
     with tab_users:
-        _show_user_management(df)
+        # User accounts aren't date-scoped, so this always sees the
+        # full fleet (e.g. for the "assigned car" dropdown) regardless
+        # of the sidebar date filter.
+        _show_user_management(full_df)
 
     with tab_audit:
         _show_audit_log()
@@ -1605,3 +1616,103 @@ def _show_audit_log():
         file_name="audit_log.csv",
         mime="text/csv",
     )
+
+
+# ============================================================
+# SIDEBAR — Admin Command Center (NEW — pro upgrade)
+# Global date filter + live fleet pulse + alerts bell + quick search,
+# all pinned in the sidebar so they're visible no matter which tab
+# the admin is on.
+# ============================================================
+def _sidebar_command_center(df: pd.DataFrame) -> pd.DataFrame:
+    st.sidebar.markdown("### 🕹️ Admin Command Center")
+
+    # --- Global date range filter (drives every analytical tab) ---
+    min_date, max_date = df["Date"].min().date(), df["Date"].max().date()
+    date_range = st.sidebar.date_input(
+        "Date range (applies to all tabs)",
+        value=(min_date, max_date),
+        min_value=min_date, max_value=max_date,
+        key="sidebar_date_range",
+    )
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        start_date, end_date = date_range
+    else:
+        start_date, end_date = min_date, max_date
+
+    if st.sidebar.button("Reset date range", key="sidebar_reset_date", use_container_width=True):
+        if "sidebar_date_range" in st.session_state:
+            del st.session_state["sidebar_date_range"]
+        st.rerun()
+
+    filtered = df[(df["Date"].dt.date >= start_date) & (df["Date"].dt.date <= end_date)]
+
+    st.sidebar.divider()
+
+    # --- Live fleet pulse ---
+    st.sidebar.markdown("#### 📊 Fleet Pulse")
+    if filtered.empty:
+        st.sidebar.warning("No records in this date range.")
+        return filtered
+
+    latest = filtered.sort_values("Date").groupby("Car_ID").last()
+    p1, p2 = st.sidebar.columns(2)
+    p1.metric("Cars", latest.shape[0])
+    p2.metric("On Road", int((latest["Fleet_Status"] == "Running").sum()))
+    p3, p4 = st.sidebar.columns(2)
+    p3.metric("Avg Batt.", f"{latest['Battery_Remaining_Percent'].mean():.0f}%")
+    p4.metric("Revenue", f"₹{filtered['Recognized_Revenue'].sum() / 1000:.0f}K")
+
+    st.sidebar.divider()
+
+    # --- Alerts bell ---
+    alerts = _build_alerts(filtered)
+    crit = sum(1 for a in alerts if a["severity"] == "Critical")
+    warn = sum(1 for a in alerts if a["severity"] == "Warning")
+    bell_icon = "🔔" if (crit + warn) else "🔕"
+    st.sidebar.markdown(f"#### {bell_icon} Alerts")
+    if alerts:
+        st.sidebar.markdown(f"🔴 **{crit}** Critical &nbsp;·&nbsp; 🟠 **{warn}** Warning")
+        with st.sidebar.expander(f"Preview top {min(3, len(alerts))}"):
+            for a in alerts[:3]:
+                st.markdown(f"**{a['title']}**")
+                st.caption(a["detail"])
+        st.sidebar.caption("Full list in the Alerts & Health tab.")
+    else:
+        st.sidebar.success("No active alerts.")
+
+    st.sidebar.divider()
+
+    # --- Quick global search (always searches the full, unfiltered
+    # fleet so the admin can find any car/driver regardless of the
+    # date range currently selected) ---
+    st.sidebar.markdown("#### 🔍 Quick Search")
+    query = st.sidebar.text_input(
+        "Car ID or driver name", key="sidebar_global_search",
+        placeholder="e.g. MG-08 or Harish",
+    )
+    if query:
+        q = query.strip().lower()
+        car_matches = [c for c in df["Car_ID"].unique() if q in str(c).lower()]
+        driver_matches = [d for d in df["Driver_Name"].unique() if q in str(d).lower()]
+
+        if not car_matches and not driver_matches:
+            st.sidebar.caption("No matches.")
+
+        for car_id in car_matches[:3]:
+            row = df[df["Car_ID"] == car_id].sort_values("Date").iloc[-1]
+            with st.sidebar.expander(f"🚗 {car_id}"):
+                st.write(f"**{row['Company']} {row['Model']}**")
+                st.write(f"Status: {row['Fleet_Status']}")
+                st.write(f"Battery: {row['Battery_Remaining_Percent']:.0f}%")
+                st.write(f"Driver: {row['Driver_Name']} — {row['City']}")
+
+        for name in driver_matches[:3]:
+            sub = df[df["Driver_Name"] == name]
+            safe_rate = 100 * (sub["Driving_Style"] == "Safe").mean() if len(sub) else 0
+            with st.sidebar.expander(f"🧑 {name}"):
+                st.write(f"Trips recorded: {len(sub)}")
+                st.write(f"Safe-driving rate: {safe_rate:.0f}%")
+                st.write(f"Total revenue: ₹{sub['Recognized_Revenue'].sum():,.0f}")
+
+    return filtered
